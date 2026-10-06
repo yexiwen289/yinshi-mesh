@@ -1,0 +1,1 @@
+MsgBox "该程序已被管家禁用" & vbCrLf & "请联系管家解除禁用", vbInformation, "管家提醒"

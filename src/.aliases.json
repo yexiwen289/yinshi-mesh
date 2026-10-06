@@ -1,0 +1,15 @@
+{
+ "aliases": {
+  "pyver": {
+   "target": "python --version",
+   "note": ""
+  }
+ },
+ "history": [
+  {
+   "ts": 1791027247.1343825,
+   "alias": "pyver",
+   "args": ""
+  }
+ ]
+}

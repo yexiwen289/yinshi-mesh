@@ -1,0 +1,69 @@
+[SCHEMA]
+{
+  "type": "function",
+  "function": {
+    "name": "ring0_audit",
+    "description": "纯CIM内核驱动三重交叉验证：直接枚举State=Running的驱动对象，比对磁盘映像是否存在与Authenticode签名有效性，检出\"已加载但映像缺失/签名无效\"的可疑Ring0组件。不碰审计日志。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "description": "full或quick"
+        }
+      },
+      "required": [
+        "mode"
+      ]
+    }
+  }
+}
+
+[CODE]
+import subprocess, os, json
+def _ring0_audit(self, mode="full"):
+    # Pure-CIM kernel driver triple cross-check.
+    # enumeration of LOADED = State eq 'Running' from kernel driver objects.
+    ps = r"""
+$C=$ErrorActionPreference='SilentlyContinue'
+$drv = Get-CimInstance Win32_SystemDriver | Select Name,PathName,State,StartName
+$rows = @()
+foreach($d in $drv){
+  $p = $d.PathName
+  $on = 'NA'
+  $sig = 'NA'
+  if($p){
+    $p0 = $p.Trim('"').Split(' ')[0]
+    $on = (Test-Path -LiteralPath $p0)
+    $sig = (Get-AuthenticodeSignature -LiteralPath $p0).Status.ToString()
+    $p = $p0
+  }
+  $rows += [pscustomobject]@{Name=$d.Name;State=$d.State;Path=$p;OnDisk=$on;Sig=$sig;Start=$d.StartName}
+}
+$rows | ConvertTo-Json -Compress
+"""
+    r = subprocess.run(["powershell","-NoProfile","-ExecutionPolicy","Bypass","-Command",ps],
+                       capture_output=True, text=True, errors="ignore")
+    txt = (r.stdout or "").strip()
+    try:
+        data = json.loads(txt)
+        if isinstance(data, dict): data=[data]
+    except Exception:
+        data=[]
+    loaded  = [d for d in data if d.get('State','').upper()=='RUNNING']
+    suspicious=[]
+    for d in loaded:
+        sig = d.get('Sig','NA')
+        on  = d.get('OnDisk','NA')
+        # loaded module whose on-disk image is missing OR signature invalid/mismatch
+        flag = (on is False) or (on=='False') or (sig not in ('Valid','NA') and sig!='NA')
+        if flag and sig != 'NA':
+            suspicious.append(d)
+    if mode=="quick":
+        return "LOADS=%d SUSPICIOUS=%d\n%s" % (len(loaded), len(suspicious),
+              "\n".join((x.get('Name') or '?')+" :: onDisk="+str(x.get('OnDisk'))+" sig="+str(x.get('Sig')) for x in suspicious) or "(none)")
+    return ("LOADED=%d | NOT_ON_DISK_OR_BADSIG=%d\n%s" % (len(loaded), len(suspicious),
+            "\n".join(json.dumps(x,ensure_ascii=False) for x in suspicious) or "(none)"))
+
+[MAP]
+ring0_audit: _ring0_audit

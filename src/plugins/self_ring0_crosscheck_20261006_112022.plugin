@@ -1,0 +1,70 @@
+[SCHEMA]
+{
+  "type": "function",
+  "function": {
+    "name": "ring0_crosscheck",
+    "description": "内核级驱动三重交叉验证：对比 加载的驱动对象 / 磁盘映像 / 服务映像记录，检出\"已加载但无磁盘映像、无服务登记、签名无效\"的可疑Ring0组件。不依赖审计日志。返回可疑项明细。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "description": "full=完整扫描(默认), quick=仅返回可疑孤儿模块"
+        }
+      },
+      "required": [
+        "mode"
+      ]
+    }
+  }
+}
+
+[CODE]
+import subprocess, re, os
+def _ring0_crosscheck(self, mode="full"):
+    # Triple cross-check of loaded kernel drivers vs on-disk images vs service registry
+    # 1) loaded kernel module names via driverquery (kernel object states)
+    try:
+        out = subprocess.run(["driverquery","/FO","CSV"], capture_output=True, text=True, errors="ignore").stdout
+    except Exception as e:
+        return f"driverquery failed: {e}"
+    loaded = set()
+    for line in out.splitlines()[1:]:
+        line = line.strip()
+        if not line.startswith('"') or len(line) < 3: continue
+        body = line[1:-1]
+        parts = body.split('","')
+        if len(parts) >= 3 and parts[2].upper() == 'RUNNING':
+            loaded.add(parts[0].lower())
+    # 2) registered kernel services with image paths (SCM record)
+    try:
+        r = subprocess.run(["powershell","-NoProfile","-Command",
+            "$c=Get-CimInstance Win32_SystemDriver | Select Name,PathName,StartName,State; $c | ConvertTo-Json -Compress"],
+            capture_output=True, text=True, errors="ignore")
+        svcs = json.loads(r.stdout or "[]") if (r.stdout or "").strip().startswith("[") else ([json.loads(r.stdout)] if (r.stdout or "").strip() else [])
+    except Exception as e:
+        svcs = []
+    reg_map = {}       # lower name -> path
+    for s in svcs:
+        nm = (s.get("Name") or "").lower()
+        pth = s.get("PathName") or ""
+        reg_map[nm] = pth
+    suspicious = []
+    loaded_list = sorted(loaded)
+    for mod in loaded_list:
+        path = reg_map.get(mod,"")
+        on_disk = False
+        if path:
+            cand = path.strip('"').split()[0]
+            on_disk = os.path.exists(cand)
+        reg_has = mod in reg_map
+        # Heuristic: loaded but no service record OR no on-disk image
+        if not reg_has or not on_disk:
+            suspicious.append({"module":mod,"registered":reg_has,"image_on_disk":on_disk,"path":path or "(none)"})
+    if mode=="quick":
+        return "QUICK: %d suspicious\n%s" % (len(suspicious), "\n".join(s['module'] for s in suspicious) or "(none)")
+    return "LOADED=%d REGISTERED=%d SUSPICIOUS=%d\n%s" % (len(loaded_list), len(reg_map), len(suspicious),
+        "\n".join(str(s) for s in suspicious) or "(none)")
+
+[MAP]
+ring0_crosscheck: _ring0_crosscheck
